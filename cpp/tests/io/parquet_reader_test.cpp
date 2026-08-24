@@ -27,6 +27,9 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/unary.hpp>
+#include <cudf/utilities/default_stream.hpp>
+
+#include <rmm/device_buffer.hpp>
 
 #include <cuda/iterator>
 
@@ -1762,6 +1765,19 @@ TEST_F(ParquetReaderTest, StructByteArray)
   CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result.tbl->view());
 }
 
+// Allocates and fills device memory through the current rmm resource and frees it again, so
+// subsequent reader allocations can land on blocks holding garbage rather than fresh zeroed
+// pages, which would let an uninitialized-slot bug hide.
+void churn_device_memory()
+{
+  auto stream = cudf::get_default_stream();
+  for (auto size : {size_t{64}, size_t{4096}, size_t{1} << 16}) {
+    auto poison = rmm::device_buffer(size, stream);
+    CUDF_CUDA_TRY(cudaMemsetAsync(poison.data(), 0xEE, size, stream.value()));
+  }
+  stream.synchronize();
+}
+
 TEST_F(ParquetReaderTest, RequiredBinaryUnderNullStruct)
 {
   // A required BYTE_ARRAY leaf under an optional struct has no leaf validity of its own; rows
@@ -1833,14 +1849,7 @@ TEST_F(ParquetReaderTest, RequiredBinaryUnderNullStruct)
   cudf::io::parquet_reader_options in_opts =
     cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath});
   for (int read = 0; read < 2; ++read) {
-    // churn the pool with garbage so an unwritten slot holds stale bytes instead of a fresh
-    // zeroed page, which would let the test pass without the fix
-    for (auto size : {size_t{64}, size_t{4096}, size_t{1} << 16}) {
-      void* poison = nullptr;
-      CUDF_CUDA_TRY(cudaMalloc(&poison, size));
-      CUDF_CUDA_TRY(cudaMemset(poison, 0xEE, size));
-      CUDF_CUDA_TRY(cudaFree(poison));
-    }
+    churn_device_memory();
     auto result = cudf::io::read_parquet(in_opts);
     CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result.tbl->view());
   }
@@ -1897,14 +1906,7 @@ TEST_F(ParquetReaderTest, RequiredIntUnderNullStruct)
   cudf::io::parquet_reader_options in_opts =
     cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath});
   for (int read = 0; read < 2; ++read) {
-    // churn the pool with garbage so an unwritten slot holds stale bytes instead of a fresh
-    // zeroed page, which would let the test pass without the fix
-    for (auto size : {size_t{64}, size_t{4096}, size_t{1} << 16}) {
-      void* poison = nullptr;
-      CUDF_CUDA_TRY(cudaMalloc(&poison, size));
-      CUDF_CUDA_TRY(cudaMemset(poison, 0xEE, size));
-      CUDF_CUDA_TRY(cudaFree(poison));
-    }
+    churn_device_memory();
     auto result = cudf::io::read_parquet(in_opts);
     CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result.tbl->view());
   }
